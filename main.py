@@ -1,80 +1,61 @@
 import os
 from dotenv import load_dotenv
-from typing import Annotated, TypedDict
 
-# Import LangGraph & LangChain components
-from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
-from langchain_groq import ChatGroq
-
-# 1. Load Environment Variables
-# Ini akan membaca file .env yang sudah kamu buat tadi
-print(f"File .env ada: {os.path.exists('.env')}")
+# Wajib load_dotenv paling atas agar API Key tersedia untuk modul lain
 load_dotenv()
-print(f"Key terbaca: {os.getenv('GROQ_API_KEY')[:10]}...") 
 
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 
-api_key = os.getenv("GROQ_API_KEY")
-if not api_key:
-    raise ValueError("Gagal menemukan GROQ_API_KEY di file .env. Pastikan sudah diisi!")
+# Import komponen yang sudah dipisah
+from src.state.state import State
+from src.tools.time_tool import tools
+from src.nodes.agent_node import call_model
 
-# 2. Definisi State (Struktur Data Agen)
-class State(TypedDict):
-    # add_messages: memastikan riwayat chat tersambung, bukan tertimpa
-    messages: Annotated[list, add_messages]
+# 1. Setup Nodes
+tool_node = ToolNode(tools)
 
-# 3. Inisialisasi LLM (The Brain)
-# Kita pakai Llama 3 70B karena penalaran (reasoning) paling kuat di Groq
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
-    temperature=0.7, # Sedikit kreatif tapi tetap terkontrol
-    groq_api_key=api_key
-)
-
-# 4. Definisi Nodes (Fungsi Logika)
-def call_model(state: State):
-    """Fungsi ini memanggil LLM untuk merespon input."""
-    response = llm.invoke(state["messages"])
-    return {"messages": [response]}
-
-# 5. Membangun Alur Kerja (The Graph)
+# 2. Build Graph
 workflow = StateGraph(State)
 
-# Tambahkan Node
 workflow.add_node("agent", call_model)
+workflow.add_node("tools", tool_node)
 
-# Tentukan Alur (Edge)
 workflow.set_entry_point("agent")
-workflow.add_edge("agent", END)
 
-# Compile menjadi Aplikasi
+# 3. Conditional Logic
+def should_continue(state: State):
+    last_message = state['messages'][-1]
+    if last_message.tool_calls:
+        return "tools"
+    return END
+
+workflow.add_conditional_edges("agent", should_continue)
+workflow.add_edge("tools", "agent")
+
+# Compile Aplikasi
 app = workflow.compile()
 
-# 6. Interface Chat (CLI)
+# 4. Interface Chat (CLI)
 if __name__ == "__main__":
-    print("\n--- 🤖 Baals_Agent Aktif (Terminal Mode) ---")
+    print("\n--- 🤖 Baals_Agent Mu Aktif ---")
     print("Ketik 'exit' untuk keluar.\n")
     
     while True:
         try:
-            user_input = input("You: ")
+            user_input = input("Baal: ")
             if user_input.lower() in ["exit", "quit", "keluar"]:
-                print("Sampai jumpa!")
                 break
 
-            # Jalankan Graph
-            # Kita kirim input sebagai pesan 'user'
             events = app.stream(
                 {"messages": [("user", user_input)]},
                 stream_mode="values"
             )
 
             for event in events:
-                # Ambil pesan terakhir dari state
                 if "messages" in event:
                     last_message = event["messages"][-1]
-                    # Kita hanya print jika itu pesan dari AI (bukan user input tadi)
-                    if hasattr(last_message, "type") and last_message.type == "ai":
+                    if hasattr(last_message, "type") and last_message.type == "ai" and last_message.content:
                         print(f"Agent: {last_message.content}\n")
 
         except Exception as e:
